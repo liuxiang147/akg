@@ -2,8 +2,19 @@
 
 归属 [liuxiang147](https://github.com/liuxiang147) / Mr.AK。
 
-**不走 LM Studio。** 对话走 Cloudflare Workers AI。
+对话走 Cloudflare 上的模型，不走本机 LM Studio。
 
-GitHub Pages 只能打开页面，不能跑模型。要能聊天，把本仓库连到 Cloudflare Pages，并绑定 Workers AI。
+## 线上地址
 
-中文控制台：Workers 和 Pages → 创建 → 连 GitHub → 选 `akg` → 设置 → 绑定 → Workers AI，变量名 `AI`。
+- 正式：https://akg.bbroot.com
+- 备用：https://akg-91m.pages.dev
+- 健康检查：https://akg.bbroot.com/api/health
+
+## 账户里各项什么意思
+
+| 项目 | 作用 |
+|---|---|
+| 计算 → 页面 → **akg** | 正在用的站点，已绑模型 |
+| 计算 → 工人 → **公斤 / akg** | 之前接错的项目，可以删 |
+| 域名 akg.bbroot.com | DNSHE 免费域，已指向页面项目 |
+| 域名 akgbbroot.com、bbroot.com | 已加进 Cloudflare，但名称服务器还没切过，目前打不开 |
