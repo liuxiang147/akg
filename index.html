@@ -48,7 +48,7 @@
         <span class="dot"></span>
         <div>
           <h1>AKG 粒子数字知识体</h1>
-          <small>归 Mr.AK · 推理走 Cloudflare</small>
+          <small>归 Mr.AK · 推理走 Cloudflare Workers AI</small>
         </div>
       </div>
       <span id="status" class="chip">检测 Cloudflare AI…</span>
@@ -77,17 +77,21 @@
     </footer>
   </div>
   <script>
+    // Nodes shown in the left panel
     const NODES = [
       { t: "AKG 核心", s: "粒子知识体。推理走 Cloudflare Workers AI。" },
       { t: "不走本机", s: "不再连 LM Studio。对话在 Cloudflare 上完成。" },
       { t: "归属", s: "仓库和账号属于 Mr.AK / liuxiang147。" },
     ];
+
     const $ = (id) => document.getElementById(id);
     const msgs = [];
     let speaking = false;
+
     function renderNodes() {
       $("nodes").innerHTML = NODES.map((n) => `<div class="card"><b>${n.t}</b><p>${n.s}</p></div>`).join("");
     }
+
     function addMsg(role, text) {
       msgs.push({ role, text });
       const el = $("msgs");
@@ -97,79 +101,176 @@
       el.appendChild(d);
       el.scrollTop = el.scrollHeight;
     }
-    function speak(text) {
-      if (!("speechSynthesis" in window)) return;
-      speechSynthesis.cancel();
-      const u = new SpeechSynthesisUtterance(text.replace(/[#*_`]/g," ").slice(0,800));
-      u.lang = "zh-CN"; u.rate = 1.12; u.pitch = 1.12;
-      const v = speechSynthesis.getVoices().find(x => x.lang.startsWith("zh"));
-      if (v) u.voice = v;
-      speaking = true; u.onend = () => { speaking = false; };
-      speechSynthesis.speak(u);
+
+    // Compatible fetch with timeout helper
+    function fetchWithTimeout(input, init = {}, ms = 4000) {
+      // Prefer AbortSignal.timeout if available
+      if (typeof AbortSignal !== 'undefined' && 'timeout' in AbortSignal) {
+        return fetch(input, { ...init, signal: AbortSignal.timeout(ms) });
+      }
+      const ac = new AbortController();
+      const id = setTimeout(() => ac.abort(), ms);
+      return fetch(input, { ...init, signal: ac.signal }).finally(() => clearTimeout(id));
     }
+
+    // Get a Chinese voice (async) with fallback
+    function getChineseVoice(timeout = 2000) {
+      return new Promise((resolve) => {
+        try {
+          const voices = speechSynthesis.getVoices();
+          const findVoice = (list) => list.find(v => v && v.lang && v.lang.startsWith('zh')) || null;
+          const v = voices && voices.length ? findVoice(voices) : null;
+          if (v) return resolve(v);
+          const onvoices = () => {
+            const v2 = findVoice(speechSynthesis.getVoices());
+            speechSynthesis.onvoiceschanged = null;
+            resolve(v2);
+          };
+          speechSynthesis.onvoiceschanged = onvoices;
+          // timeout fallback
+          setTimeout(() => {
+            speechSynthesis.onvoiceschanged = null;
+            resolve(null);
+          }, timeout);
+        } catch (e) { resolve(null); }
+      });
+    }
+
+    async function speak(text) {
+      if (!('speechSynthesis' in window)) return;
+      try {
+        speechSynthesis.cancel();
+        const u = new SpeechSynthesisUtterance(text.replace(/[#*_`]/g, ' ').slice(0, 800));
+        u.lang = 'zh-CN'; u.rate = 1.12; u.pitch = 1.12;
+        const v = await getChineseVoice(1500);
+        if (v) u.voice = v;
+        speaking = true; u.onend = () => { speaking = false; };
+        speechSynthesis.speak(u);
+      } catch (e) {
+        console.warn('speech failed', e);
+      }
+    }
+
     async function ping() {
       try {
-        const r = await fetch("/api/health", { signal: AbortSignal.timeout(4000) });
+        const r = await fetchWithTimeout('/api/health', {}, 4000);
+        if (!r.ok) throw new Error('HTTP ' + r.status);
         const j = await r.json();
-        if (j.ok && j.bound) {
+        if (j && j.ok && j.bound) {
           $("status").textContent = "Cloudflare AI 已就绪";
           $("status").className = "chip ok";
-          $("foot").textContent = j.engine;
-        } else if (j.ok) {
+          $("foot").textContent = j.engine || 'Workers AI';
+        } else if (j && j.ok) {
           $("status").textContent = "页面已上 · 还需绑定 Workers AI";
           $("status").className = "chip bad";
-        } else throw new Error("bad");
-      } catch {
+        } else throw new Error('bad');
+      } catch (e) {
+        console.warn('ping error', e);
         $("status").textContent = "还没部署到 Cloudflare Pages";
         $("status").className = "chip bad";
         $("foot").textContent = "GitHub Pages 没有模型";
       }
     }
+
+    // Build messages for the API: keep recent history and avoid huge payloads
+    function buildMessages() {
+      const ctx = NODES.map(n => `【${n.t}】${n.s}`).join('\n');
+      const recent = msgs.slice(-12); // keep only the last 12 entries
+      const mapped = recent.map(m => ({ role: m.role === 'bot' ? 'assistant' : 'user', content: m.text }));
+      return { system: ctx, messages: [{ role: 'system', content: ctx }, ...mapped] };
+    }
+
     async function chat() {
       const q = $("q").value.trim();
       if (!q) return;
-      $("q").value = "";
-      addMsg("user", q);
+      $("q").value = '';
+      addMsg('user', q);
       $("send").disabled = true;
       try {
-        const r = await fetch("/api/chat", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            messages: msgs.map(m => ({ role: m.role === "bot" ? "assistant" : "user", content: m.text })),
-          }),
-        });
+        const payload = buildMessages();
+        const r = await fetchWithTimeout('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ messages: payload.messages }),
+        }, 12000);
+        if (!r.ok) throw new Error('HTTP ' + r.status);
         const j = await r.json();
-        const text = (j.text || j.error || "没有返回").trim();
-        addMsg("bot", text);
+        const text = (j.text || j.answer || j.error || '没有返回').trim();
+        addMsg('bot', text);
         if (j.text) speak(text);
         if (j.model) $("foot").textContent = j.model;
-      } catch {
-        addMsg("bot", "连不上 Cloudflare 模型。要把仓库连到 Cloudflare Pages，并绑定 Workers AI。");
+      } catch (e) {
+        console.warn('chat error', e);
+        addMsg('bot', '连不上 Cloudflare 模型。要把仓库连到 Cloudflare Pages，并绑定 Workers AI。');
       }
       $("send").disabled = false;
     }
-    const cv = $("cv"), ctx = cv.getContext("2d");
-    const pts = Array.from({ length: 900 }, () => ({ a: Math.random()*Math.PI*2, r: 40+Math.random()*110 }));
-    function resize(){ cv.width = cv.clientWidth * devicePixelRatio; cv.height = cv.clientHeight * devicePixelRatio; }
+
+    const cv = $("cv");
+    const ctx = cv.getContext('2d');
+    let pts = [];
+
+    function makePts(count) {
+      return Array.from({ length: count }, () => ({ a: Math.random() * Math.PI * 2, r: 40 + Math.random() * 110 }));
+    }
+
+    function resize(){
+      const dpr = window.devicePixelRatio || 1;
+      cv.width = Math.floor(cv.clientWidth * dpr);
+      cv.height = Math.floor(cv.clientHeight * dpr);
+      // ensure drawing is crisp on high DPI
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      // regenerate points adaptively (cap to 900)
+      const area = Math.max(1, cv.clientWidth * cv.clientHeight);
+      const count = Math.max(120, Math.min(900, Math.floor(area / 600))); // heuristic
+      pts = makePts(count);
+    }
+
     function draw(t){
       const w = cv.width, h = cv.height;
-      ctx.fillStyle = "#05070a"; ctx.fillRect(0,0,w,h);
-      const cx = w/2, cy = h*0.48, pulse = speaking ? 1.08 + Math.sin(t/80)*0.06 : 1;
+      ctx.fillStyle = '#05070a'; ctx.fillRect(0,0,w,h);
+      const cx = (w/2) / (window.devicePixelRatio || 1), cy = (h*0.48) / (window.devicePixelRatio || 1);
+      const pulse = speaking ? 1.08 + Math.sin(t/80) * 0.06 : 1;
+      const dpr = window.devicePixelRatio || 1;
       pts.forEach((p,i) => {
-        const x = cx + Math.cos(p.a + t/4000)*p.r*pulse*devicePixelRatio;
-        const y = cy + Math.sin(p.a*1.3 + t/3500)*p.r*0.72*pulse*devicePixelRatio + Math.sin(i+t/500)*6;
-        ctx.fillStyle = i%7===0 ? "rgba(168,85,247,.85)" : "rgba(34,211,238,.8)";
-        ctx.fillRect(x,y,1.6*devicePixelRatio,1.6*devicePixelRatio);
+        const x = cx + Math.cos(p.a + t/4000) * p.r * pulse;
+        const y = cy + Math.sin(p.a*1.3 + t/3500) * p.r * 0.72 * pulse + Math.sin(i + t/500) * 6;
+        ctx.fillStyle = i%7===0 ? 'rgba(168,85,247,.85)' : 'rgba(34,211,238,.8)';
+        // draw a 1.6px square in CSS pixels
+        ctx.fillRect(x, y, 1.6, 1.6);
       });
       requestAnimationFrame(draw);
     }
+
+    // Speech recognition / microphone with better error handling
+    function startRecognition() {
+      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SR) { addMsg('bot', '这台浏览器没有语音识别。'); return; }
+      try {
+        const rec = new SR(); rec.lang = 'zh-CN';
+        rec.onresult = (e) => { $("q").value = e.results[0][0].transcript || ''; chat(); };
+        rec.onerror = (ev) => { addMsg('bot', '语音识别失败：' + (ev.error || '未知错误')); };
+        rec.onend = () => { /* noop */ };
+        rec.start();
+      } catch (e) {
+        console.warn('rec error', e); addMsg('bot', '启动语音识别失败。');
+      }
+    }
+
+    // wire up UI
     $("send").onclick = chat;
-    $("q").addEventListener("keydown", (e) => { if (e.key==="Enter" && !e.shiftKey) { e.preventDefault(); chat(); } });
-    window.addEventListener("resize", resize);
+    $("q").addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); chat(); } });
+
+    // small helper: debounce resize
+    let _rt;
+    window.addEventListener('resize', () => { clearTimeout(_rt); _rt = setTimeout(resize, 120); });
+
     renderNodes();
-    addMsg("bot", "现在不走 LM Studio。对话走 Cloudflare。把仓库连上 Pages 并绑定 AI 之后就能聊。");
+    addMsg('bot', '现在不走 LM Studio。对话走 Cloudflare。把仓库连上 Pages 并绑定 AI 之后就能聊。');
     resize(); requestAnimationFrame(draw); ping();
+
+    // optional mic button if you want to enable later
+    // document.querySelector('#mic')?.addEventListener('click', startRecognition);
   </script>
 </body>
 </html>
